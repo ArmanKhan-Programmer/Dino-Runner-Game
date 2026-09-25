@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Dino Runner</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100svh; display: grid; place-items: center;
+      background: #f7f7f7; color: #535353; font-family: Arial, Helvetica, sans-serif;
+      -webkit-tap-highlight-color: transparent; user-select: none;
+    }
+    .game-shell { width: min(100%, 1000px); padding: 18px; }
+    canvas {
+      display: block; width: 100%; height: auto; aspect-ratio: 10 / 3;
+      border: 2px solid #dedede; border-radius: 12px; background: #fff;
+      touch-action: manipulation; cursor: pointer;
+    }
+    .hint { margin: 10px 2px 0; text-align: center; font-size: 13px; letter-spacing: .03em; }
+    kbd { border: 1px solid #bdbdbd; border-bottom-width: 2px; border-radius: 4px; padding: 1px 5px; font-family: inherit; }
+    @media (prefers-color-scheme: dark) {
+      body { background: #202124; color: #e8eaed; }
+      canvas { background: #202124; border-color: #4b4d50; }
+      kbd { border-color: #767b80; }
+    }
+  </style>
+</head>
+<body>
+  <main class="game-shell">
+    <canvas id="game" aria-label="Dino Runner game. Press space, up arrow, or tap to jump." role="img"></canvas>
+    <p class="hint"><kbd>Space</kbd> / <kbd>↑</kbd> to jump · Tap or click to play</p>
+  </main>
+
+  <script>
+  (() => {
+    'use strict';
+
+    // Logical canvas size. Rendering is scaled for high-DPI displays below.
+    const W = 1000, H = 300, GROUND_Y = 238;
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    const darkQuery = matchMedia('(prefers-color-scheme: dark)');
+
+    /** Obtain colors each frame so the game follows the system color preference. */
+    function palette() {
+      return darkQuery.matches
+        ? { ink: '#e8eaed', faint: '#9aa0a6', cloud: '#34373b', panel: '#202124' }
+        : { ink: '#535353', faint: '#9b9b9b', cloud: '#ededed', panel: '#ffffff' };
+    }
+
+    function resizeCanvas() {
+      const dpr = Math.min(devicePixelRatio || 1, 2);
+      canvas.width = W * dpr;
+      canvas.height = H * dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.imageSmoothingEnabled = false;
+    }
+    addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    // Audio is created only after the first user interaction, as browsers require.
+    class Sound {
+      constructor() { this.context = null; this.enabled = true; }
+      wake() {
+        if (!this.enabled) return;
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContext) return;
+        this.context ||= new AudioContext();
+        if (this.context.state === 'suspended') this.context.resume();
+      }
+      tone(frequency, duration, type = 'square', volume = 0.035, slide = 1) {
+        if (!this.context || !this.enabled) return;
+        const now = this.context.currentTime;
+        const oscillator = this.context.createOscillator();
+        const gain = this.context.createGain();
+        oscillator.type = type;
+        oscillator.frequency.setValueAtTime(frequency, now);
+        oscillator.frequency.exponentialRampToValueAtTime(Math.max(25, frequency * slide), now + duration);
+        gain.gain.setValueAtTime(volume, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+        oscillator.connect(gain).connect(this.context.destination);
+        oscillator.start(now); oscillator.stop(now + duration);
+      }
+      jump() { this.tone(330, .12, 'square', .028, 1.7); }
+      point() { this.tone(880, .06, 'sine', .02, 1.12); }
+      crash() { this.tone(150, .28, 'sawtooth', .045, .32); }
+    }
+    const sound = new Sound();
+
+    class Dino {
+      constructor() {
+        this.x = 98; this.width = 46; this.height = 50;
+        this.reset();
+      }
+      reset() { this.y = GROUND_Y - this.height; this.velocity = 0; this.grounded = true; this.step = 0; }
+      jump() {
+        if (!this.grounded) return false;
+        this.velocity = -705; this.grounded = false; sound.jump(); return true;
+      }
+      update(dt, running) {
+        if (!running) return;
+        this.velocity += 2100 * dt;
+        this.y += this.velocity * dt;
+        if (this.y >= GROUND_Y - this.height) {
+          this.y = GROUND_Y - this.height; this.velocity = 0; this.grounded = true;
+        }
+        if (this.grounded) this.step += dt * 13;
+      }
+      // Slightly inset rectangle makes collisions match the visible pixel dinosaur.
+      hitbox() { return { x: this.x + 7, y: this.y + 5, w: 34, h: 43 }; }
+      draw(c) {
+        const p = palette(), x = this.x, y = Math.round(this.y);
+        c.fillStyle = p.ink;
+        // Pixel-art style head, neck, torso, tail and legs.
+        c.fillRect(x + 23, y, 21, 20); c.fillRect(x + 17, y + 12, 27, 23);
+        c.fillRect(x + 10, y + 25, 29, 15); c.fillRect(x + 4, y + 31, 17, 8);
+        c.fillRect(x, y + 35, 12, 5); c.fillRect(x + 36, y + 17, 10, 7);
+        c.fillStyle = palette().panel; c.fillRect(x + 34, y + 5, 4, 4); // eye
+        c.fillStyle = p.ink;
+        c.fillRect(x + 27, y + 35, 7, 13);
+        const legOffset = this.grounded && Math.floor(this.step) % 2 === 0 ? 0 : 6;
+        c.fillRect(x + 38, y + 35, 7, 13 - legOffset);
+        c.fillRect(x + 23, y + 46, 13, 4); c.fillRect(x + 35, y + 46 - legOffset, 13, 4);
+        c.fillRect(x + 15, y + 22, 8, 5); // tiny arm
+      }
+    }
+
+    class Cactus {
+      constructor(x, variant) {
+        this.x = x; this.variant = variant;
+        this.width = variant === 2 ? 48 : (variant === 1 ? 32 : 22);
+        this.height = variant === 2 ? 66 : (variant === 1 ? 55 : 43);
+      }
+      update(dt, speed) { this.x -= speed * dt; }
+      hitbox() { return { x: this.x + 3, y: GROUND_Y - this.height + 3, w: this.width - 6, h: this.height - 3 }; }
+      draw(c) {
+        const p = palette(), x = Math.round(this.x), y = GROUND_Y - this.height;
+        c.fillStyle = p.ink;
+        if (this.variant === 2) {
+          this.drawPlant(c, x + 2, y + 15, 20, this.height - 15);
+          this.drawPlant(c, x + 26, y, 20, this.height);
+        } else this.drawPlant(c, x, y, this.width, this.height);
+      }
+      drawPlant(c, x, y, w, h) {
+        const trunk = Math.max(8, Math.round(w * .44));
+        const cx = x + Math.round((w - trunk) / 2);
+        c.fillRect(cx, y, trunk, h);
+        const armW = Math.max(6, Math.round(w * .3));
+        if (h > 42) {
+          c.fillRect(x, y + Math.round(h * .48), armW, 7);
+          c.fillRect(x, y + Math.round(h * .32), 7, Math.round(h * .2));
+        }
+        if (h > 35) {
+          c.fillRect(cx + trunk, y + Math.round(h * .32), armW, 7);
+          c.fillRect(cx + trunk + armW - 7, y + Math.round(h * .17), 7, Math.round(h * .2));
+        }
+      }
+    }
+
+    class Game {
+      constructor() {
+        this.dino = new Dino(); this.obstacles = []; this.state = 'ready';
+        this.score = 0; this.highScore = this.loadHighScore(); this.speed = 365;
+        this.spawnDistance = 390; this.groundOffset = 0; this.cloudOffset = 0;
+        this.lastTime = 0; this.nextMilestone = 100;
+        requestAnimationFrame(t => this.loop(t));
+      }
+      loadHighScore() { try { return Number(localStorage.getItem('dinoRunnerHighScore')) || 0; } catch { return 0; } }
+      saveHighScore() { try { localStorage.setItem('dinoRunnerHighScore', String(this.highScore)); } catch { /* private mode may deny storage */ } }
+      start() {
+        if (this.state === 'gameover') this.reset();
+        if (this.state === 'ready') this.state = 'running';
+      }
+      reset() {
+        this.dino.reset(); this.obstacles = []; this.score = 0; this.speed = 365;
+        this.spawnDistance = 350; this.groundOffset = 0; this.nextMilestone = 100; this.state = 'running';
+      }
+      action() {
+        sound.wake();
+        if (this.state !== 'running') this.start();
+        // The same first key press/tap both starts the game and makes the first jump.
+        this.dino.jump();
+      }
+      spawn() {
+        const variant = Math.random() < .18 ? 2 : Math.random() < .55 ? 1 : 0;
+        this.obstacles.push(new Cactus(W + 25, variant));
+        // Spacing rises with speed; every cactus gets additional random breathing room.
+        this.spawnDistance = 300 + Math.random() * 260 + this.speed * .13;
+      }
+      update(dt) {
+        if (this.state !== 'running') return;
+        this.speed = Math.min(760, this.speed + 4.8 * dt);
+        this.score += dt * 10;
+        this.groundOffset = (this.groundOffset + this.speed * dt) % 24;
+        this.cloudOffset = (this.cloudOffset + this.speed * .12 * dt) % W;
+        this.dino.update(dt, true);
+        this.spawnDistance -= this.speed * dt;
+        if (this.spawnDistance <= 0) this.spawn();
+        for (const cactus of this.obstacles) cactus.update(dt, this.speed);
+        this.obstacles = this.obstacles.filter(cactus => cactus.x + cactus.width > -10);
+        if (this.obstacles.some(cactus => overlaps(this.dino.hitbox(), cactus.hitbox()))) this.gameOver();
+        if (Math.floor(this.score) >= this.nextMilestone) { sound.point(); this.nextMilestone += 100; }
+      }
+      gameOver() {
+        this.state = 'gameover'; sound.crash();
+        const rounded = Math.floor(this.score);
+        if (rounded > this.highScore) { this.highScore = rounded; this.saveHighScore(); }
+      }
+      loop(time) {
+        const dt = Math.min(.035, (time - this.lastTime) / 1000 || 0);
+        this.lastTime = time; this.update(dt); this.draw();
+        requestAnimationFrame(t => this.loop(t));
+      }
+      draw() {
+        const p = palette();
+        ctx.clearRect(0, 0, W, H);
+        this.drawClouds(p); this.drawGround(p);
+        this.obstacles.forEach(cactus => cactus.draw(ctx)); this.dino.draw(ctx);
+        this.drawScore(p); this.drawOverlay(p);
+      }
+      drawClouds(p) {
+        ctx.fillStyle = p.cloud;
+        for (const cloud of [{ x: 180, y: 54 }, { x: 650, y: 82 }, { x: 910, y: 42 }]) {
+          let x = (cloud.x - this.cloudOffset + W) % (W + 120) - 60, y = cloud.y;
+          ctx.fillRect(x, y + 9, 53, 11); ctx.fillRect(x + 11, y + 2, 18, 15); ctx.fillRect(x + 30, y, 14, 20);
+        }
+      }
+      drawGround(p) {
+        ctx.fillStyle = p.ink; ctx.fillRect(0, GROUND_Y, W, 3);
+        ctx.fillStyle = p.faint;
+        for (let x = -this.groundOffset; x < W; x += 24) {
+          const w = (Math.floor((x + this.groundOffset) / 24) % 3 === 0) ? 13 : 7;
+          ctx.fillRect(Math.round(x), GROUND_Y + 12 + (Math.floor(x / 24) % 2) * 3, w, 3);
+        }
+      }
+      drawScore(p) {
+        ctx.fillStyle = p.ink; ctx.font = 'bold 18px monospace'; ctx.textAlign = 'right';
+        const score = String(Math.floor(this.score)).padStart(5, '0');
+        ctx.fillText('HI ' + String(this.highScore).padStart(5, '0') + '  ' + score, W - 24, 35);
+      }
+      drawOverlay(p) {
+        if (this.state === 'running') return;
+        ctx.textAlign = 'center'; ctx.fillStyle = p.ink;
+        if (this.state === 'ready') {
+          ctx.font = 'bold 28px Arial'; ctx.fillText('DINO RUNNER', W / 2, 102);
+          ctx.font = '16px Arial'; ctx.fillStyle = p.faint; ctx.fillText('Press Space, ↑, or tap to start', W / 2, 132);
+        } else {
+          ctx.font = 'bold 27px Arial'; ctx.fillText('GAME OVER', W / 2, 108);
+          ctx.font = '16px Arial'; ctx.fillStyle = p.faint; ctx.fillText('Tap or press Space to restart', W / 2, 138);
+          // Restart badge.
+          ctx.strokeStyle = p.ink; ctx.lineWidth = 2; ctx.strokeRect(W / 2 - 23, 158, 46, 32);
+          ctx.font = 'bold 22px Arial'; ctx.fillStyle = p.ink; ctx.fillText('↻', W / 2, 182);
+        }
+      }
+    }
+
+    function overlaps(a, b) {
+      return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+    }
+
+    const game = new Game();
+    addEventListener('keydown', event => {
+      if (event.code === 'Space' || event.code === 'ArrowUp') {
+        event.preventDefault();
+        if (!event.repeat) game.action();
+      }
+    }, { passive: false });
+    canvas.addEventListener('pointerdown', event => { event.preventDefault(); game.action(); });
+  })();
+  </script>
+</body>
+</html>
